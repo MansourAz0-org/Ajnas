@@ -117,6 +117,9 @@ export class NeckFollower {
     const video = this.video;
     if (this.busy || !this.worker || this.stopped) return;
     if (!this.pending && !this.referenced) return;
+    // Like the hand model, pause while the window is hidden: nothing is
+    // shown, and a lost neck would keep searching (tens of ms per frame).
+    if (typeof document !== "undefined" && document.hidden) return;
     if (video.readyState < 2 || !video.videoWidth || !video.videoHeight) return;
     this.busy = true;
     const capturedAt = performance.now();
