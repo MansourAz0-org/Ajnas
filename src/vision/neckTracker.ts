@@ -811,14 +811,30 @@ export function matchDescriptors(
   const second = new Int32Array(n).fill(DESCRIPTOR_BITS + 1);
   const reverse = new Int32Array(m).fill(-1);
   const reverseDistance = new Int32Array(m).fill(DESCRIPTOR_BITS + 1);
-  for (let i = 0; i < n; i++)
-    for (let j = 0; j < m; j++) {
-      let d = 0;
-      for (let w = 0; w < DESCRIPTOR_WORDS; w++)
-        d += popcount(
-          from.bits[i * DESCRIPTOR_WORDS + w] ^
-            to.bits[j * DESCRIPTOR_WORDS + w],
-        );
+  const a = from.bits;
+  const b = to.bits;
+  // Eight words per descriptor (DESCRIPTOR_WORDS), unrolled: this loop
+  // compares every pair of points of a searched frame.
+  for (let i = 0; i < n; i++) {
+    const p = i * 8;
+    const a0 = a[p],
+      a1 = a[p + 1],
+      a2 = a[p + 2],
+      a3 = a[p + 3],
+      a4 = a[p + 4],
+      a5 = a[p + 5],
+      a6 = a[p + 6],
+      a7 = a[p + 7];
+    for (let j = 0, q = 0; j < m; j++, q += 8) {
+      const d =
+        popcount(a0 ^ b[q]) +
+        popcount(a1 ^ b[q + 1]) +
+        popcount(a2 ^ b[q + 2]) +
+        popcount(a3 ^ b[q + 3]) +
+        popcount(a4 ^ b[q + 4]) +
+        popcount(a5 ^ b[q + 5]) +
+        popcount(a6 ^ b[q + 6]) +
+        popcount(a7 ^ b[q + 7]);
       if (d < bestDistance[i]) {
         second[i] = bestDistance[i];
         bestDistance[i] = d;
@@ -829,6 +845,7 @@ export function matchDescriptors(
         reverse[j] = i;
       }
     }
+  }
   const out: { from: Point; to: Point }[] = [];
   for (let i = 0; i < n; i++) {
     const j = best[i];
