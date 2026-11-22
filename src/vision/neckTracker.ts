@@ -364,63 +364,79 @@ export function strongestCorners(
   const { width, height } = level.image;
   const { dx, dy } = level;
   const n = width * height;
-  // 5×5 sums of the gradient products: across, then down.
-  const sums = [0, 1, 2].map((which) => {
-    const across = new Float32Array(n);
-    for (let y = 0; y < height; y++) {
-      let sum = 0;
-      const row = y * width;
-      for (let x = 0; x < width; x++) {
-        const i = row + x;
-        sum +=
-          which === 0
-            ? dx[i] * dx[i]
-            : which === 1
-              ? dx[i] * dy[i]
-              : dy[i] * dy[i];
-        if (x >= 5) {
-          const j = i - 5;
-          sum -=
-            which === 0
-              ? dx[j] * dx[j]
-              : which === 1
-                ? dx[j] * dy[j]
-                : dy[j] * dy[j];
-        }
-        if (x >= 4) across[i - 2] = sum;
-      }
-    }
-    const down = new Float32Array(n);
+  // 5×5 sums of the gradient products: across, then down, all three at once.
+  const acrossXX = new Float32Array(n);
+  const acrossXY = new Float32Array(n);
+  const acrossYY = new Float32Array(n);
+  for (let y = 0; y < height; y++) {
+    let sumXX = 0,
+      sumXY = 0,
+      sumYY = 0;
+    const row = y * width;
     for (let x = 0; x < width; x++) {
-      let sum = 0;
-      for (let y = 0; y < height; y++) {
-        const i = y * width + x;
-        sum += across[i];
-        if (y >= 5) sum -= across[i - 5 * width];
-        if (y >= 4) down[i - 2 * width] = sum;
+      const i = row + x;
+      sumXX += dx[i] * dx[i];
+      sumXY += dx[i] * dy[i];
+      sumYY += dy[i] * dy[i];
+      if (x >= 5) {
+        const j = i - 5;
+        sumXX -= dx[j] * dx[j];
+        sumXY -= dx[j] * dy[j];
+        sumYY -= dy[j] * dy[j];
+      }
+      if (x >= 4) {
+        acrossXX[i - 2] = sumXX;
+        acrossXY[i - 2] = sumXY;
+        acrossYY[i - 2] = sumYY;
       }
     }
-    return down;
-  });
-  const [xx, xy, yy] = sums;
+  }
+  const xx = new Float32Array(n);
+  const xy = new Float32Array(n);
+  const yy = new Float32Array(n);
+  const step = 5 * width;
+  for (let x = 0; x < width; x++) {
+    let sumXX = 0,
+      sumXY = 0,
+      sumYY = 0;
+    for (let y = 0; y < height; y++) {
+      const i = y * width + x;
+      sumXX += acrossXX[i];
+      sumXY += acrossXY[i];
+      sumYY += acrossYY[i];
+      if (y >= 5) {
+        sumXX -= acrossXX[i - step];
+        sumXY -= acrossXY[i - step];
+        sumYY -= acrossYY[i - step];
+      }
+      if (y >= 4) {
+        xx[i - 2 * width] = sumXX;
+        xy[i - 2 * width] = sumXY;
+        yy[i - 2 * width] = sumYY;
+      }
+    }
+  }
   const columns = Math.ceil(width / cell);
   const rows = Math.ceil(height / cell);
   const score = new Float32Array(columns * rows);
   const at = new Int32Array(columns * rows).fill(-1);
   let best = 0;
-  for (let y = 4; y < height - 4; y++)
+  for (let y = 4; y < height - 4; y++) {
+    const blockRow = Math.floor(y / cell) * columns;
     for (let x = 4; x < width - 4; x++) {
       const i = y * width + x;
       const a = xx[i];
       const c = yy[i];
-      const value = (a + c) / 2 - Math.sqrt(((a - c) / 2) ** 2 + xy[i] * xy[i]);
-      const k = Math.floor(y / cell) * columns + Math.floor(x / cell);
+      const half = (a - c) / 2;
+      const value = (a + c) / 2 - Math.sqrt(half * half + xy[i] * xy[i]);
+      const k = blockRow + Math.floor(x / cell);
       if (value > score[k] && accept(x, y)) {
         score[k] = value;
         at[k] = i;
         if (value > best) best = value;
       }
     }
+  }
   const floor = Math.max(best * 0.02, 1e-3);
   return Array.from(at.keys())
     .filter((k) => at[k] >= 0 && score[k] >= floor)
