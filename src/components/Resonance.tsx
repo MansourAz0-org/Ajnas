@@ -17,7 +17,11 @@ export function Resonance({
     let last = 0;
     let pulse = 0;
     let phase = 0;
+    /** What the canvas shows; null = it must be redrawn. */
+    let shown: { pulse: number; color: string; w: number; h: number } | null =
+      null;
     const draw = (now: number) => {
+      raf = requestAnimationFrame(draw);
       const w = canvas.clientWidth,
         h = canvas.clientHeight;
       const dpr = Math.min(devicePixelRatio || 1, 2);
@@ -27,9 +31,8 @@ export function Resonance({
       ) {
         canvas.width = Math.round(w * dpr);
         canvas.height = Math.round(h * dpr);
+        shown = null; // Resizing clears the canvas.
       }
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.clearRect(0, 0, w, h);
       const frame = store.frame;
       const present = !!frame?.note && now - store.receivedAt < 500;
       const energy = present
@@ -47,6 +50,20 @@ export function Resonance({
         present && Math.abs(frame?.note?.cents ?? 99) < 10
           ? "214,183,122"
           : "101,171,166";
+      // Silent and settled: ripples and string swing (pulse × 6 px) are
+      // invisible and the picture is unchanged, so skip the redraw.
+      if (
+        shown &&
+        shown.w === w &&
+        shown.h === h &&
+        shown.color === color &&
+        Math.abs(shown.pulse - pulse) < 1e-3 &&
+        (!motion || pulse < 0.005)
+      )
+        return;
+      shown = { pulse, color, w, h };
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
       const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius * 1.9);
       glow.addColorStop(0, `rgba(${color},${0.05 + pulse * 0.12})`);
       glow.addColorStop(1, `rgba(${color},0)`);
@@ -91,7 +108,6 @@ export function Resonance({
       ctx.beginPath();
       ctx.arc(cx, cy, 3 + pulse * 3, 0, Math.PI * 2);
       ctx.fill();
-      raf = requestAnimationFrame(draw);
     };
     raf = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(raf);
