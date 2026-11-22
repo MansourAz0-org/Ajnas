@@ -173,27 +173,42 @@ function downsample(g: Gray): Gray {
   return { width, height, data };
 }
 
-/** Image, horizontal and vertical gradient per pyramid level. */
-interface Level {
-  image: Gray;
-  dx: Float32Array;
-  dy: Float32Array;
+/**
+ * Image, horizontal and vertical gradient per pyramid level. Gradients are
+ * computed on first use: a frame that is only followed into never needs
+ * them, only keyframes and searched frames do.
+ */
+class Level {
+  private gradients: { dx: Float32Array; dy: Float32Array } | null = null;
+
+  constructor(readonly image: Gray) {}
+
+  get dx(): Float32Array {
+    return (this.gradients ??= gradients(this.image)).dx;
+  }
+
+  get dy(): Float32Array {
+    return (this.gradients ??= gradients(this.image)).dy;
+  }
+}
+
+function gradients({ width, height, data }: Gray) {
+  const dx = new Float32Array(width * height);
+  const dy = new Float32Array(width * height);
+  for (let y = 1; y < height - 1; y++)
+    for (let x = 1; x < width - 1; x++) {
+      const i = y * width + x;
+      dx[i] = (data[i + 1] - data[i - 1]) / 2;
+      dy[i] = (data[i + width] - data[i - width]) / 2;
+    }
+  return { dx, dy };
 }
 
 export function pyramid(g: Gray, levels: number): Level[] {
   const out: Level[] = [];
   let image = g;
   for (let l = 0; l <= levels && image.width >= 16 && image.height >= 16; l++) {
-    const { width, height, data } = image;
-    const dx = new Float32Array(width * height);
-    const dy = new Float32Array(width * height);
-    for (let y = 1; y < height - 1; y++)
-      for (let x = 1; x < width - 1; x++) {
-        const i = y * width + x;
-        dx[i] = (data[i + 1] - data[i - 1]) / 2;
-        dy[i] = (data[i + width] - data[i - width]) / 2;
-      }
-    out.push({ image, dx, dy });
+    out.push(new Level(image));
     image = downsample(image);
   }
   return out;
