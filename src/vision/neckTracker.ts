@@ -629,12 +629,27 @@ export function fitSimilarity(
   const n = src.length;
   if (n < Math.max(2, minInliers)) return null;
   const next = random(n * 7919 + 17);
+  // transformPoint inlined: this runs for every pair on every iteration.
+  const limit = threshold * threshold;
   const count = (h: Homography) => {
-    const inliers = src.map((p, i) => {
-      const q = transformPoint(h, p);
-      return !!q && Math.hypot(q.x - dst[i].x, q.y - dst[i].y) <= threshold;
-    });
-    return { inliers, total: inliers.filter(Boolean).length };
+    const [h0, h1, h2, h3, h4, h5, h6, h7, h8] = h;
+    const inliers = new Array<boolean>(n);
+    let total = 0;
+    for (let i = 0; i < n; i++) {
+      const { x, y } = src[i];
+      const w = h6 * x + h7 * y + h8;
+      const ex = (h0 * x + h1 * y + h2) / w - dst[i].x;
+      const ey = (h3 * x + h4 * y + h5) / w - dst[i].y;
+      // False for a degenerate w or a non-finite result, as transformPoint.
+      const inlier =
+        Math.abs(w) >= 1e-10 &&
+        w !== Infinity &&
+        w !== -Infinity &&
+        ex * ex + ey * ey <= limit;
+      inliers[i] = inlier;
+      if (inlier) total++;
+    }
+    return { inliers, total };
   };
   let best: { h: Homography; inliers: boolean[]; total: number } | null = null;
   for (let k = 0; k < iterations; k++) {
