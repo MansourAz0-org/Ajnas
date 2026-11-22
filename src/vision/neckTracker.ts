@@ -220,6 +220,51 @@ function bilinear(
 }
 
 /**
+ * `data` sampled on the (2·half+1)² grid centred on (x, y), row by row, into
+ * `out`. Equal to `bilinear` at each grid point; a window wholly inside the
+ * image shares one set of weights.
+ */
+function sampleWindow(
+  data: Float32Array,
+  width: number,
+  height: number,
+  x: number,
+  y: number,
+  half: number,
+  out: Float64Array,
+) {
+  let s = 0;
+  if (
+    x - half >= 0 &&
+    y - half >= 0 &&
+    x + half <= width - 1.001 &&
+    y + half <= height - 1.001
+  ) {
+    const x0 = Math.floor(x);
+    const y0 = Math.floor(y);
+    const fx = x - x0;
+    const fy = y - y0;
+    const w00 = (1 - fx) * (1 - fy);
+    const w01 = fx * (1 - fy);
+    const w10 = (1 - fx) * fy;
+    const w11 = fx * fy;
+    for (let v = -half; v <= half; v++) {
+      let i = (y0 + v) * width + x0 - half;
+      for (let u = -half; u <= half; u++, s++, i++)
+        out[s] =
+          data[i] * w00 +
+          data[i + 1] * w01 +
+          data[i + width] * w10 +
+          data[i + width + 1] * w11;
+    }
+    return;
+  }
+  for (let v = -half; v <= half; v++)
+    for (let u = -half; u <= half; u++, s++)
+      out[s] = bilinear(data, width, height, x + u, y + v);
+}
+
+/**
  * Shi–Tomasi features: the smaller eigenvalue of the 5×5 structure tensor,
  * strongest first, at least `minDistance` apart, where `accept(x, y)` holds.
  */
@@ -381,6 +426,11 @@ export function trackPoints(
   half: number,
 ): (Point | null)[] {
   const levels = Math.min(previous.length, next.length);
+  const side = 2 * half + 1;
+  // Window samples (brightness, x and y gradient), reused for every point.
+  const value = new Float64Array(side * side);
+  const gradX = new Float64Array(side * side);
+  const gradY = new Float64Array(side * side);
   return points.map((point, index) => {
     const guess = guesses?.[index] ?? point;
     let gx = (guess.x - point.x) / 2 ** (levels - 1);
@@ -396,44 +446,67 @@ export function trackPoints(
       let gxx = 0,
         gxy = 0,
         gyy = 0;
-      const samples: number[] = [];
-      for (let v = -half; v <= half; v++)
-        for (let u = -half; u <= half; u++) {
-          const ix = bilinear(a.dx, width, height, px + u, py + v);
-          const iy = bilinear(a.dy, width, height, px + u, py + v);
-          gxx += ix * ix;
-          gxy += ix * iy;
-          gyy += iy * iy;
-          samples.push(
-            bilinear(a.image.data, width, height, px + u, py + v),
-            ix,
-            iy,
-          );
-        }
+      sampleWindow(a.image.data, width, height, px, py, half, value);
+      sampleWindow(a.dx, width, height, px, py, half, gradX);
+      sampleWindow(a.dy, width, height, px, py, half, gradY);
+      for (let s = 0; s < value.length; s++) {
+        const ix = gradX[s];
+        const iy = gradY[s];
+        gxx += ix * ix;
+        gxy += ix * iy;
+        gyy += iy * iy;
+      }
       const det = gxx * gyy - gxy * gxy;
       const minEig =
         (gxx + gyy) / 2 - Math.sqrt(((gxx - gyy) / 2) ** 2 + gxy * gxy);
-      if (det < 1e-6 || minEig / (2 * half + 1) ** 2 < 1e-3) return null;
+      if (det < 1e-6 || minEig / side ** 2 < 1e-3) return null;
+      const target = b.image.data;
       let dx = 0,
         dy = 0;
       for (let k = 0; k < 20; k++) {
         let bx = 0,
-          by = 0,
-          s = 0;
-        for (let v = -half; v <= half; v++)
-          for (let u = -half; u <= half; u++, s += 3) {
-            const diff =
-              samples[s] -
-              bilinear(
-                b.image.data,
-                width,
-                height,
-                px + u + gx + dx,
-                py + v + gy + dy,
-              );
-            bx += diff * samples[s + 1];
-            by += diff * samples[s + 2];
+          by = 0;
+        const cx = px + gx + dx;
+        const cy = py + gy + dy;
+        if (
+          cx - half >= 0 &&
+          cy - half >= 0 &&
+          cx + half <= width - 1.001 &&
+          cy + half <= height - 1.001
+        ) {
+          // The whole window lies inside: one set of bilinear weights.
+          const x0 = Math.floor(cx);
+          const y0 = Math.floor(cy);
+          const fx = cx - x0;
+          const fy = cy - y0;
+          const w00 = (1 - fx) * (1 - fy);
+          const w01 = fx * (1 - fy);
+          const w10 = (1 - fx) * fy;
+          const w11 = fx * fy;
+          let s = 0;
+          for (let v = -half; v <= half; v++) {
+            let i = (y0 + v) * width + x0 - half;
+            for (let u = -half; u <= half; u++, s++, i++) {
+              const diff =
+                value[s] -
+                (target[i] * w00 +
+                  target[i + 1] * w01 +
+                  target[i + width] * w10 +
+                  target[i + width + 1] * w11);
+              bx += diff * gradX[s];
+              by += diff * gradY[s];
+            }
           }
+        } else {
+          let s = 0;
+          for (let v = -half; v <= half; v++)
+            for (let u = -half; u <= half; u++, s++) {
+              const diff =
+                value[s] - bilinear(target, width, height, cx + u, cy + v);
+              bx += diff * gradX[s];
+              by += diff * gradY[s];
+            }
+        }
         const ex = (gyy * bx - gxy * by) / det;
         const ey = (gxx * by - gxy * bx) / det;
         dx += ex;
