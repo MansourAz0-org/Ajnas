@@ -718,19 +718,34 @@ function blurred(g: Gray): Float32Array {
   const { width, height, data } = g;
   const pass = new Float32Array(width * height);
   const out = new Float32Array(width * height);
+  // Edges clamp; the interior adds the same five values in the same order
+  // without clamping.
   for (let y = 0; y < height; y++)
     for (let x = 0; x < width; x++) {
+      const i = y * width + x;
       let sum = 0;
-      for (let u = -2; u <= 2; u++)
-        sum += data[y * width + Math.min(width - 1, Math.max(0, x + u))];
-      pass[y * width + x] = sum / 5;
+      if (x >= 2 && x < width - 2)
+        sum = data[i - 2] + data[i - 1] + data[i] + data[i + 1] + data[i + 2];
+      else
+        for (let u = -2; u <= 2; u++)
+          sum += data[y * width + Math.min(width - 1, Math.max(0, x + u))];
+      pass[i] = sum / 5;
     }
   for (let y = 0; y < height; y++)
     for (let x = 0; x < width; x++) {
+      const i = y * width + x;
       let sum = 0;
-      for (let v = -2; v <= 2; v++)
-        sum += pass[Math.min(height - 1, Math.max(0, y + v)) * width + x];
-      out[y * width + x] = sum / 5;
+      if (y >= 2 && y < height - 2)
+        sum =
+          pass[i - 2 * width] +
+          pass[i - width] +
+          pass[i] +
+          pass[i + width] +
+          pass[i + 2 * width];
+      else
+        for (let v = -2; v <= 2; v++)
+          sum += pass[Math.min(height - 1, Math.max(0, y + v)) * width + x];
+      out[i] = sum / 5;
     }
   return out;
 }
