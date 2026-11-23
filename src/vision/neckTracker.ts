@@ -173,27 +173,42 @@ function downsample(g: Gray): Gray {
   return { width, height, data };
 }
 
-/** Image, horizontal and vertical gradient per pyramid level. */
-interface Level {
-  image: Gray;
-  dx: Float32Array;
-  dy: Float32Array;
+/**
+ * Image, horizontal and vertical gradient per pyramid level. Gradients are
+ * computed on first use: a frame that is only followed into never needs
+ * them, only keyframes and searched frames do.
+ */
+class Level {
+  private gradients: { dx: Float32Array; dy: Float32Array } | null = null;
+
+  constructor(readonly image: Gray) {}
+
+  get dx(): Float32Array {
+    return (this.gradients ??= gradients(this.image)).dx;
+  }
+
+  get dy(): Float32Array {
+    return (this.gradients ??= gradients(this.image)).dy;
+  }
+}
+
+function gradients({ width, height, data }: Gray) {
+  const dx = new Float32Array(width * height);
+  const dy = new Float32Array(width * height);
+  for (let y = 1; y < height - 1; y++)
+    for (let x = 1; x < width - 1; x++) {
+      const i = y * width + x;
+      dx[i] = (data[i + 1] - data[i - 1]) / 2;
+      dy[i] = (data[i + width] - data[i - width]) / 2;
+    }
+  return { dx, dy };
 }
 
 export function pyramid(g: Gray, levels: number): Level[] {
   const out: Level[] = [];
   let image = g;
   for (let l = 0; l <= levels && image.width >= 16 && image.height >= 16; l++) {
-    const { width, height, data } = image;
-    const dx = new Float32Array(width * height);
-    const dy = new Float32Array(width * height);
-    for (let y = 1; y < height - 1; y++)
-      for (let x = 1; x < width - 1; x++) {
-        const i = y * width + x;
-        dx[i] = (data[i + 1] - data[i - 1]) / 2;
-        dy[i] = (data[i + width] - data[i - width]) / 2;
-      }
-    out.push({ image, dx, dy });
+    out.push(new Level(image));
     image = downsample(image);
   }
   return out;
@@ -217,6 +232,51 @@ function bilinear(
     (data[i] * (1 - fx) + data[i + 1] * fx) * (1 - fy) +
     (data[i + width] * (1 - fx) + data[i + width + 1] * fx) * fy
   );
+}
+
+/**
+ * `data` sampled on the (2·half+1)² grid centred on (x, y), row by row, into
+ * `out`. Equal to `bilinear` at each grid point; a window wholly inside the
+ * image shares one set of weights.
+ */
+function sampleWindow(
+  data: Float32Array,
+  width: number,
+  height: number,
+  x: number,
+  y: number,
+  half: number,
+  out: Float64Array,
+) {
+  let s = 0;
+  if (
+    x - half >= 0 &&
+    y - half >= 0 &&
+    x + half <= width - 1.001 &&
+    y + half <= height - 1.001
+  ) {
+    const x0 = Math.floor(x);
+    const y0 = Math.floor(y);
+    const fx = x - x0;
+    const fy = y - y0;
+    const w00 = (1 - fx) * (1 - fy);
+    const w01 = fx * (1 - fy);
+    const w10 = (1 - fx) * fy;
+    const w11 = fx * fy;
+    for (let v = -half; v <= half; v++) {
+      let i = (y0 + v) * width + x0 - half;
+      for (let u = -half; u <= half; u++, s++, i++)
+        out[s] =
+          data[i] * w00 +
+          data[i + 1] * w01 +
+          data[i + width] * w10 +
+          data[i + width + 1] * w11;
+    }
+    return;
+  }
+  for (let v = -half; v <= half; v++)
+    for (let u = -half; u <= half; u++, s++)
+      out[s] = bilinear(data, width, height, x + u, y + v);
 }
 
 /**
@@ -304,63 +364,79 @@ export function strongestCorners(
   const { width, height } = level.image;
   const { dx, dy } = level;
   const n = width * height;
-  // 5×5 sums of the gradient products: across, then down.
-  const sums = [0, 1, 2].map((which) => {
-    const across = new Float32Array(n);
-    for (let y = 0; y < height; y++) {
-      let sum = 0;
-      const row = y * width;
-      for (let x = 0; x < width; x++) {
-        const i = row + x;
-        sum +=
-          which === 0
-            ? dx[i] * dx[i]
-            : which === 1
-              ? dx[i] * dy[i]
-              : dy[i] * dy[i];
-        if (x >= 5) {
-          const j = i - 5;
-          sum -=
-            which === 0
-              ? dx[j] * dx[j]
-              : which === 1
-                ? dx[j] * dy[j]
-                : dy[j] * dy[j];
-        }
-        if (x >= 4) across[i - 2] = sum;
-      }
-    }
-    const down = new Float32Array(n);
+  // 5×5 sums of the gradient products: across, then down, all three at once.
+  const acrossXX = new Float32Array(n);
+  const acrossXY = new Float32Array(n);
+  const acrossYY = new Float32Array(n);
+  for (let y = 0; y < height; y++) {
+    let sumXX = 0,
+      sumXY = 0,
+      sumYY = 0;
+    const row = y * width;
     for (let x = 0; x < width; x++) {
-      let sum = 0;
-      for (let y = 0; y < height; y++) {
-        const i = y * width + x;
-        sum += across[i];
-        if (y >= 5) sum -= across[i - 5 * width];
-        if (y >= 4) down[i - 2 * width] = sum;
+      const i = row + x;
+      sumXX += dx[i] * dx[i];
+      sumXY += dx[i] * dy[i];
+      sumYY += dy[i] * dy[i];
+      if (x >= 5) {
+        const j = i - 5;
+        sumXX -= dx[j] * dx[j];
+        sumXY -= dx[j] * dy[j];
+        sumYY -= dy[j] * dy[j];
+      }
+      if (x >= 4) {
+        acrossXX[i - 2] = sumXX;
+        acrossXY[i - 2] = sumXY;
+        acrossYY[i - 2] = sumYY;
       }
     }
-    return down;
-  });
-  const [xx, xy, yy] = sums;
+  }
+  const xx = new Float32Array(n);
+  const xy = new Float32Array(n);
+  const yy = new Float32Array(n);
+  const step = 5 * width;
+  for (let x = 0; x < width; x++) {
+    let sumXX = 0,
+      sumXY = 0,
+      sumYY = 0;
+    for (let y = 0; y < height; y++) {
+      const i = y * width + x;
+      sumXX += acrossXX[i];
+      sumXY += acrossXY[i];
+      sumYY += acrossYY[i];
+      if (y >= 5) {
+        sumXX -= acrossXX[i - step];
+        sumXY -= acrossXY[i - step];
+        sumYY -= acrossYY[i - step];
+      }
+      if (y >= 4) {
+        xx[i - 2 * width] = sumXX;
+        xy[i - 2 * width] = sumXY;
+        yy[i - 2 * width] = sumYY;
+      }
+    }
+  }
   const columns = Math.ceil(width / cell);
   const rows = Math.ceil(height / cell);
   const score = new Float32Array(columns * rows);
   const at = new Int32Array(columns * rows).fill(-1);
   let best = 0;
-  for (let y = 4; y < height - 4; y++)
+  for (let y = 4; y < height - 4; y++) {
+    const blockRow = Math.floor(y / cell) * columns;
     for (let x = 4; x < width - 4; x++) {
       const i = y * width + x;
       const a = xx[i];
       const c = yy[i];
-      const value = (a + c) / 2 - Math.sqrt(((a - c) / 2) ** 2 + xy[i] * xy[i]);
-      const k = Math.floor(y / cell) * columns + Math.floor(x / cell);
+      const half = (a - c) / 2;
+      const value = (a + c) / 2 - Math.sqrt(half * half + xy[i] * xy[i]);
+      const k = blockRow + Math.floor(x / cell);
       if (value > score[k] && accept(x, y)) {
         score[k] = value;
         at[k] = i;
         if (value > best) best = value;
       }
     }
+  }
   const floor = Math.max(best * 0.02, 1e-3);
   return Array.from(at.keys())
     .filter((k) => at[k] >= 0 && score[k] >= floor)
@@ -381,6 +457,11 @@ export function trackPoints(
   half: number,
 ): (Point | null)[] {
   const levels = Math.min(previous.length, next.length);
+  const side = 2 * half + 1;
+  // Window samples (brightness, x and y gradient), reused for every point.
+  const value = new Float64Array(side * side);
+  const gradX = new Float64Array(side * side);
+  const gradY = new Float64Array(side * side);
   return points.map((point, index) => {
     const guess = guesses?.[index] ?? point;
     let gx = (guess.x - point.x) / 2 ** (levels - 1);
@@ -396,44 +477,67 @@ export function trackPoints(
       let gxx = 0,
         gxy = 0,
         gyy = 0;
-      const samples: number[] = [];
-      for (let v = -half; v <= half; v++)
-        for (let u = -half; u <= half; u++) {
-          const ix = bilinear(a.dx, width, height, px + u, py + v);
-          const iy = bilinear(a.dy, width, height, px + u, py + v);
-          gxx += ix * ix;
-          gxy += ix * iy;
-          gyy += iy * iy;
-          samples.push(
-            bilinear(a.image.data, width, height, px + u, py + v),
-            ix,
-            iy,
-          );
-        }
+      sampleWindow(a.image.data, width, height, px, py, half, value);
+      sampleWindow(a.dx, width, height, px, py, half, gradX);
+      sampleWindow(a.dy, width, height, px, py, half, gradY);
+      for (let s = 0; s < value.length; s++) {
+        const ix = gradX[s];
+        const iy = gradY[s];
+        gxx += ix * ix;
+        gxy += ix * iy;
+        gyy += iy * iy;
+      }
       const det = gxx * gyy - gxy * gxy;
       const minEig =
         (gxx + gyy) / 2 - Math.sqrt(((gxx - gyy) / 2) ** 2 + gxy * gxy);
-      if (det < 1e-6 || minEig / (2 * half + 1) ** 2 < 1e-3) return null;
+      if (det < 1e-6 || minEig / side ** 2 < 1e-3) return null;
+      const target = b.image.data;
       let dx = 0,
         dy = 0;
       for (let k = 0; k < 20; k++) {
         let bx = 0,
-          by = 0,
-          s = 0;
-        for (let v = -half; v <= half; v++)
-          for (let u = -half; u <= half; u++, s += 3) {
-            const diff =
-              samples[s] -
-              bilinear(
-                b.image.data,
-                width,
-                height,
-                px + u + gx + dx,
-                py + v + gy + dy,
-              );
-            bx += diff * samples[s + 1];
-            by += diff * samples[s + 2];
+          by = 0;
+        const cx = px + gx + dx;
+        const cy = py + gy + dy;
+        if (
+          cx - half >= 0 &&
+          cy - half >= 0 &&
+          cx + half <= width - 1.001 &&
+          cy + half <= height - 1.001
+        ) {
+          // The whole window lies inside: one set of bilinear weights.
+          const x0 = Math.floor(cx);
+          const y0 = Math.floor(cy);
+          const fx = cx - x0;
+          const fy = cy - y0;
+          const w00 = (1 - fx) * (1 - fy);
+          const w01 = fx * (1 - fy);
+          const w10 = (1 - fx) * fy;
+          const w11 = fx * fy;
+          let s = 0;
+          for (let v = -half; v <= half; v++) {
+            let i = (y0 + v) * width + x0 - half;
+            for (let u = -half; u <= half; u++, s++, i++) {
+              const diff =
+                value[s] -
+                (target[i] * w00 +
+                  target[i + 1] * w01 +
+                  target[i + width] * w10 +
+                  target[i + width + 1] * w11);
+              bx += diff * gradX[s];
+              by += diff * gradY[s];
+            }
           }
+        } else {
+          let s = 0;
+          for (let v = -half; v <= half; v++)
+            for (let u = -half; u <= half; u++, s++) {
+              const diff =
+                value[s] - bilinear(target, width, height, cx + u, cy + v);
+              bx += diff * gradX[s];
+              by += diff * gradY[s];
+            }
+        }
         const ex = (gyy * bx - gxy * by) / det;
         const ey = (gxx * by - gxy * bx) / det;
         dx += ex;
@@ -525,12 +629,27 @@ export function fitSimilarity(
   const n = src.length;
   if (n < Math.max(2, minInliers)) return null;
   const next = random(n * 7919 + 17);
+  // transformPoint inlined: this runs for every pair on every iteration.
+  const limit = threshold * threshold;
   const count = (h: Homography) => {
-    const inliers = src.map((p, i) => {
-      const q = transformPoint(h, p);
-      return !!q && Math.hypot(q.x - dst[i].x, q.y - dst[i].y) <= threshold;
-    });
-    return { inliers, total: inliers.filter(Boolean).length };
+    const [h0, h1, h2, h3, h4, h5, h6, h7, h8] = h;
+    const inliers = new Array<boolean>(n);
+    let total = 0;
+    for (let i = 0; i < n; i++) {
+      const { x, y } = src[i];
+      const w = h6 * x + h7 * y + h8;
+      const ex = (h0 * x + h1 * y + h2) / w - dst[i].x;
+      const ey = (h3 * x + h4 * y + h5) / w - dst[i].y;
+      // False for a degenerate w or a non-finite result, as transformPoint.
+      const inlier =
+        Math.abs(w) >= 1e-10 &&
+        w !== Infinity &&
+        w !== -Infinity &&
+        ex * ex + ey * ey <= limit;
+      inliers[i] = inlier;
+      if (inlier) total++;
+    }
+    return { inliers, total };
   };
   let best: { h: Homography; inliers: boolean[]; total: number } | null = null;
   for (let k = 0; k < iterations; k++) {
@@ -599,19 +718,34 @@ function blurred(g: Gray): Float32Array {
   const { width, height, data } = g;
   const pass = new Float32Array(width * height);
   const out = new Float32Array(width * height);
+  // Edges clamp; the interior adds the same five values in the same order
+  // without clamping.
   for (let y = 0; y < height; y++)
     for (let x = 0; x < width; x++) {
+      const i = y * width + x;
       let sum = 0;
-      for (let u = -2; u <= 2; u++)
-        sum += data[y * width + Math.min(width - 1, Math.max(0, x + u))];
-      pass[y * width + x] = sum / 5;
+      if (x >= 2 && x < width - 2)
+        sum = data[i - 2] + data[i - 1] + data[i] + data[i + 1] + data[i + 2];
+      else
+        for (let u = -2; u <= 2; u++)
+          sum += data[y * width + Math.min(width - 1, Math.max(0, x + u))];
+      pass[i] = sum / 5;
     }
   for (let y = 0; y < height; y++)
     for (let x = 0; x < width; x++) {
+      const i = y * width + x;
       let sum = 0;
-      for (let v = -2; v <= 2; v++)
-        sum += pass[Math.min(height - 1, Math.max(0, y + v)) * width + x];
-      out[y * width + x] = sum / 5;
+      if (y >= 2 && y < height - 2)
+        sum =
+          pass[i - 2 * width] +
+          pass[i - width] +
+          pass[i] +
+          pass[i + width] +
+          pass[i + 2 * width];
+      else
+        for (let v = -2; v <= 2; v++)
+          sum += pass[Math.min(height - 1, Math.max(0, y + v)) * width + x];
+      out[i] = sum / 5;
     }
   return out;
 }
@@ -692,14 +826,30 @@ export function matchDescriptors(
   const second = new Int32Array(n).fill(DESCRIPTOR_BITS + 1);
   const reverse = new Int32Array(m).fill(-1);
   const reverseDistance = new Int32Array(m).fill(DESCRIPTOR_BITS + 1);
-  for (let i = 0; i < n; i++)
-    for (let j = 0; j < m; j++) {
-      let d = 0;
-      for (let w = 0; w < DESCRIPTOR_WORDS; w++)
-        d += popcount(
-          from.bits[i * DESCRIPTOR_WORDS + w] ^
-            to.bits[j * DESCRIPTOR_WORDS + w],
-        );
+  const a = from.bits;
+  const b = to.bits;
+  // Eight words per descriptor (DESCRIPTOR_WORDS), unrolled: this loop
+  // compares every pair of points of a searched frame.
+  for (let i = 0; i < n; i++) {
+    const p = i * 8;
+    const a0 = a[p],
+      a1 = a[p + 1],
+      a2 = a[p + 2],
+      a3 = a[p + 3],
+      a4 = a[p + 4],
+      a5 = a[p + 5],
+      a6 = a[p + 6],
+      a7 = a[p + 7];
+    for (let j = 0, q = 0; j < m; j++, q += 8) {
+      const d =
+        popcount(a0 ^ b[q]) +
+        popcount(a1 ^ b[q + 1]) +
+        popcount(a2 ^ b[q + 2]) +
+        popcount(a3 ^ b[q + 3]) +
+        popcount(a4 ^ b[q + 4]) +
+        popcount(a5 ^ b[q + 5]) +
+        popcount(a6 ^ b[q + 6]) +
+        popcount(a7 ^ b[q + 7]);
       if (d < bestDistance[i]) {
         second[i] = bestDistance[i];
         bestDistance[i] = d;
@@ -710,6 +860,7 @@ export function matchDescriptors(
         reverse[j] = i;
       }
     }
+  }
   const out: { from: Point; to: Point }[] = [];
   for (let i = 0; i < n; i++) {
     const j = best[i];
